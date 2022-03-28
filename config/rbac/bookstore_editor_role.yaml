@@ -1,0 +1,24 @@
+# permissions for end users to edit bookstores.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: bookstore-editor-role
+rules:
+- apiGroups:
+  - bookstore.livreiro
+  resources:
+  - bookstores
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - bookstore.livreiro
+  resources:
+  - bookstores/status
+  verbs:
+  - get

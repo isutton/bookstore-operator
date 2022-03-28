@@ -1,0 +1,6 @@
+apiVersion: bookstore.livreiro/v1beta1
+kind: Bookstore
+metadata:
+  name: bookstore-sample
+spec:
+  # TODO(user): Add fields here
