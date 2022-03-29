@@ -21,6 +21,9 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
+	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -29,15 +32,29 @@ import (
 	bookstorev1beta1 "github.com/isutton/bookstore-operator/api/v1beta1"
 
 	"helm.sh/helm/v3/pkg/action"
+	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/kube"
+	"helm.sh/helm/v3/pkg/release"
+	"helm.sh/helm/v3/pkg/storage"
+	"helm.sh/helm/v3/pkg/storage/driver"
 )
 
 // BookstoreReconciler reconciles a Bookstore object
 type BookstoreReconciler struct {
 	client.Client
 	Scheme     *runtime.Scheme
+	ChartDir   string
 	RESTConfig *rest.Config
+}
+
+func NewBookstoreReconciler(mgr ctrl.Manager, restConfig *rest.Config, chartDir string) *BookstoreReconciler {
+	return &BookstoreReconciler{
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		ChartDir:   chartDir,
+		RESTConfig: restConfig,
+	}
 }
 
 //+kubebuilder:rbac:groups=bookstore.livreiro,resources=bookstores,verbs=get;list;watch;create;update;patch;delete
@@ -54,75 +71,154 @@ type BookstoreReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.11.0/pkg/reconcile
 func (r *BookstoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
-	// TODO: find out how to populate a RESTClientGetter from the
-	//       information we have at hand (for example the
-	//       r.RESTConfig field recently added).
-	kubeClient := kube.New(nil)
+	coreClient := corev1.NewForConfigOrDie(r.RESTConfig)
+	cmDriver := driver.NewSecrets(coreClient.Secrets(req.NamespacedName.Namespace))
+	getter := genericclioptions.NewConfigFlags(true)
+	getter.Namespace = &req.NamespacedName.Namespace
+	kubeClient := kube.New(getter)
+	kubeClient.Namespace = req.NamespacedName.Namespace
 
-	// TODO: share r.Client with cfg below, so `listAction.Run()`
-	//       benefits from the same cache.
-	cfg := &action.Configuration{
-		KubeClient: kubeClient,
-		Log:        kubeClient.Log,
+	config := &action.Configuration{
+		Releases:         storage.Init(cmDriver),
+		KubeClient:       kubeClient,
+		Log:              kubeClient.Log,
+		RESTClientGetter: getter,
 	}
 
-	listAction := action.NewList(cfg)
-	releases, err := listAction.Run()
-	if err != nil {
-		// errors here are exceptional as it only requires a
-		// read-only access to the cluster to list releases.
+	if ok, err := r.IsUninstall(ctx, req.NamespacedName); err != nil {
 		return ctrl.Result{Requeue: true}, err
+	} else if ok {
+		logger.Info("Uninstalling tenant")
+		if uninstallErr := r.Uninstall(config, req.NamespacedName); uninstallErr != nil {
+			return ctrl.Result{Requeue: true}, uninstallErr
+		}
+		return ctrl.Result{}, nil
 	}
 
-	// TODO: simplify this flow moving code into smaller
-	//       functions; the flow here doesn't read clear as I
-	//       mixed both and non-functional flows.
+	if ok, err := r.IsInstall(ctx, config, req.NamespacedName); err != nil {
+		return ctrl.Result{Requeue: true}, err
+	} else if ok {
+		logger.Info("Installing tenant")
+		if installErr := r.Install(ctx, config, req.NamespacedName); installErr != nil {
+			return ctrl.Result{Requeue: true}, installErr
+		}
+	} else {
+		logger.Info("Upgrading tenant")
+		if upgradeErr := r.Upgrade(ctx, config, req.NamespacedName); upgradeErr != nil {
+			return ctrl.Result{Requeue: true}, upgradeErr
+		}
+	}
+
+	return ctrl.Result{}, nil
+}
+
+func (r *BookstoreReconciler) GetReleases(config *action.Configuration) ([]*release.Release, error) {
+	return action.NewList(config).Run()
+}
+
+func (r *BookstoreReconciler) GetBookstore(ctx context.Context, namespacedName types.NamespacedName) (*bookstorev1beta1.Bookstore, error) {
 	bookstore := &bookstorev1beta1.Bookstore{}
-	if err := r.Client.Get(ctx, req.NamespacedName, bookstore); err != nil {
-		if !errors.IsNotFound(err) {
-			return ctrl.Result{Requeue: true}, err
-		}
-		uninstallAction := action.NewUninstall(cfg)
-		_, err := uninstallAction.Run(req.NamespacedName.Name)
-		if err != nil {
-			return ctrl.Result{Requeue: true}, err
-		}
-		return ctrl.Result{Requeue: false}, nil
+	if err := r.Client.Get(ctx, namespacedName, bookstore); err != nil {
+		return bookstore, err
 	}
+	return bookstore, nil
+}
 
-	// TODO: embed chart bytes instead.
-	chrt, err := loader.LoadDir(".")
+func (r *BookstoreReconciler) IsUninstall(ctx context.Context, namespacedName types.NamespacedName) (bool, error) {
+	_, err := r.GetBookstore(ctx, namespacedName)
 	if err != nil {
-		return ctrl.Result{Requeue: false}, err
+		if errors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
+}
+
+func (r *BookstoreReconciler) IsInstall(ctx context.Context, config *action.Configuration, namespacedName types.NamespacedName) (bool, error) {
+	releases, err := r.GetReleases(config)
+	if err != nil {
+		return false, err
 	}
 
-	// process to check whether releases do exist for the current bookstore.
 	foundRelease := false
 	for _, release := range releases {
-		if release.Name == req.NamespacedName.Name &&
-			release.Namespace == req.NamespacedName.Namespace {
+		if release.Name == namespacedName.Name &&
+			release.Namespace == namespacedName.Namespace {
 			foundRelease = true
 			break
 		}
 	}
 
-	if !foundRelease {
-		installAction := action.NewInstall(cfg)
-		_, err := installAction.Run(chrt, nil)
-		if err != nil {
-			return ctrl.Result{Requeue: false}, err
-		}
-	} else {
-		updateAction := action.NewUpgrade(cfg)
-		_, err := updateAction.Run(req.NamespacedName.Name, chrt, nil)
-		if err != nil {
-			return ctrl.Result{Requeue: false}, err
+	return !foundRelease, nil
+}
+
+func (r *BookstoreReconciler) Install(ctx context.Context, config *action.Configuration, namespacedName types.NamespacedName) error {
+	chrt, loadChartErr := r.LoadChart()
+	if loadChartErr != nil {
+		return loadChartErr
+	}
+
+	i := action.NewInstall(config)
+	i.ReleaseName = namespacedName.Name
+	i.Namespace = namespacedName.Namespace
+
+	_, installErr := i.RunWithContext(ctx, chrt, nil)
+
+	return installErr
+}
+
+func (r *BookstoreReconciler) GetRelease(ctx context.Context, config *action.Configuration, namespacedName types.NamespacedName) (*release.Release, error) {
+	releases, err := r.GetReleases(config)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, release := range releases {
+		if release.Name == namespacedName.Name && release.Namespace == namespacedName.Namespace {
+			return release, nil
 		}
 	}
 
-	return ctrl.Result{}, nil
+	return nil, nil
+}
+
+func (r *BookstoreReconciler) Upgrade(ctx context.Context, config *action.Configuration, namespacedName types.NamespacedName) error {
+	chrt, loadChartErr := r.LoadChart()
+	if loadChartErr != nil {
+		return loadChartErr
+	}
+
+	release, err := r.GetRelease(ctx, config, namespacedName)
+	if err != nil {
+		return err
+	}
+
+	if release == nil {
+		return nil
+	}
+
+	if release.Chart.AppVersion() == chrt.AppVersion() {
+		return nil
+	}
+
+	u := action.NewUpgrade(config)
+	u.Namespace = namespacedName.Namespace
+
+	_, upgradeErr := action.NewUpgrade(config).RunWithContext(ctx, namespacedName.Name, chrt, nil)
+
+	return upgradeErr
+}
+
+func (r *BookstoreReconciler) Uninstall(config *action.Configuration, namespacedName types.NamespacedName) error {
+	_, err := action.NewUninstall(config).Run(namespacedName.Name)
+	return err
+}
+
+func (r *BookstoreReconciler) LoadChart() (*chart.Chart, error) {
+	return loader.LoadDir(r.ChartDir)
 }
 
 // SetupWithManager sets up the controller with the Manager.

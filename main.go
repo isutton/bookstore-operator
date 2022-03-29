@@ -52,6 +52,8 @@ func main() {
 	var metricsAddr string
 	var enableLeaderElection bool
 	var probeAddr string
+	var chartDir string
+	flag.StringVar(&chartDir, "chart-dir", "charts/bookstore-saas", "The directory where the chart to be installed resides")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -80,11 +82,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&controllers.BookstoreReconciler{
-		RESTConfig: config,
-		Client:     mgr.GetClient(),
-		Scheme:     mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
+	if err = controllers.NewBookstoreReconciler(mgr, config, chartDir).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Bookstore")
 		os.Exit(1)
 	}

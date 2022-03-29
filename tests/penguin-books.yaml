@@ -1,0 +1,7 @@
+apiVersion: bookstore.livreiro/v1beta1
+kind: Bookstore
+metadata:
+  name: penguin-books
+  namespace: prod
+spec:
+  customerId: f55e8b5b-05a9-45a9-85c1-f6fe6679a43e

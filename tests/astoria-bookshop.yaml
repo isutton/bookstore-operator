@@ -1,0 +1,8 @@
+apiVersion: bookstore.livreiro/v1beta1
+kind: Bookstore
+metadata:
+  name: astoria-bookshop
+  namespace: prod
+spec:
+  customerId: 1abca84c-31e7-4724-9dfd-f61ea227e390
+  
