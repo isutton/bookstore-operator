@@ -1,0 +1,17 @@
+apiVersion: binding.operators.coreos.com/v1alpha1
+kind: ServiceBinding
+metadata:
+  name: {{ include "bookstore-saas.fullname" . }}
+  labels:
+    {{- include "bookstore-saas.labels" . | nindent 4 }}
+spec:
+  services:
+    - group: postgres-operator.crunchydata.com
+      version: v1beta1
+      kind: PostgresCluster
+      name: {{ .Release.Name }}-database
+  application:
+    name: {{ include "bookstore-saas.fullname" . }}
+    group: apps
+    version: v1
+    resource: deployments
