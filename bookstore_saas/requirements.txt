@@ -1,0 +1,13 @@
+asgiref==3.5.0
+Django==4.0.3
+jedi==0.17.2
+parso==0.7.1
+pluggy==1.0.0
+podman-compose==1.0.3
+psycopg2==2.9.3
+python-dotenv==0.20.0
+python-jsonrpc-server==0.4.0
+python-language-server==0.36.2
+PyYAML==6.0
+sqlparse==0.4.2
+ujson==5.1.0

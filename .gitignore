@@ -23,3 +23,10 @@ testbin/*
 *.swp
 *.swo
 *~
+
+# dotenv
+.env
+
+# python
+.venv/
+*.pyc
